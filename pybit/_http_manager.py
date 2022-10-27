@@ -330,12 +330,8 @@ class _HTTPManager:
                         time=dt.utcnow().strftime("%H:%M:%S")
                     )
 
-            if "usdc" in path:
-                ret_code = "retCode"
-                ret_msg = "retMsg"
-            else:
-                ret_code = "ret_code"
-                ret_msg = "ret_msg"
+            ret_code = "retCode" if "retCode" in s_json else "ret_code"
+            ret_msg = "retMsg" if "retMsg" in s_json else "ret_msg"
 
             # If Bybit returns an error, raise.
             if s_json[ret_code]:
