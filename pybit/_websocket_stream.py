@@ -29,10 +29,12 @@ class _WebSocketManager:
     def __init__(self, callback_function, ws_name,
                  test, domain="", api_key=None, api_secret=None,
                  ping_interval=20, ping_timeout=10, retries=10,
-                 restart_on_error=True, trace_logging=False):
+                 restart_on_error=True, trace_logging=False,
+                 **run_params):
 
         self.test = test
         self.domain = domain
+        self.run_params = run_params
 
         # Set API keys.
         self.api_key = api_key
@@ -142,7 +144,8 @@ class _WebSocketManager:
             # Setup the thread running WebSocketApp.
             self.wst = threading.Thread(target=lambda: self.ws.run_forever(
                 ping_interval=self.ping_interval,
-                ping_timeout=self.ping_timeout
+                ping_timeout=self.ping_timeout,
+                **self.run_params
             ))
 
             # Configure as daemon; start.

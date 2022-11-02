@@ -23,7 +23,8 @@ class _HTTPManager:
                  logging_level=logging.INFO, log_requests=False,
                  request_timeout=10, recv_window=5000, force_retry=False,
                  retry_codes=None, ignore_codes=None, max_retries=3,
-                 retry_delay=3, referral_id=None, record_request_time=False):
+                 retry_delay=3, referral_id=None, record_request_time=False,
+                 **session_params):
         """Initializes the HTTP class."""
 
         # Set the endpoint.
@@ -81,6 +82,8 @@ class _HTTPManager:
                 "Accept": "application/json",
             }
         )
+        for key, value in session_params.items():
+            setattr(self.client, key, value)
 
         # Add referral ID to header.
         self.referral_id = referral_id
