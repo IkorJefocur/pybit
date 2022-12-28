@@ -335,6 +335,8 @@ class _HTTPManager:
 
             ret_code = "retCode" if "retCode" in s_json else "ret_code"
             ret_msg = "retMsg" if "retMsg" in s_json else "ret_msg"
+            rate_limit_reset = "rateLimitResetMs" \
+                if "rateLimitResetMs" in s_json else "rate_limit_reset_ms"
 
             # If Bybit returns an error, raise.
             if s_json[ret_code]:
@@ -364,7 +366,8 @@ class _HTTPManager:
                         )
 
                         # Calculate how long we need to wait.
-                        limit_reset = s_json["rate_limit_reset_ms"] / 1000
+                        limit_reset = s_json[rate_limit_reset] / 1000 \
+                            if rate_limit_reset in s_json else time.time() + 1
                         reset_str = time.strftime(
                             "%X", time.localtime(limit_reset)
                         )
