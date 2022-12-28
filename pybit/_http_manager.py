@@ -37,7 +37,7 @@ class _HTTPManager:
 
         self.logger = logging.getLogger(__name__)
 
-        if len(logging.root.handlers) == 0:
+        if len(self.logger.handlers) == 0 and len(logging.root.handlers) == 0:
             #no handler on root logger set -> we add handler just for this logger to not mess with custom logic from outside
             handler = logging.StreamHandler()
             handler.setFormatter(logging.Formatter(fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
