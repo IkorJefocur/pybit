@@ -30,8 +30,6 @@ setup(
     packages=['pybit'],
     python_requires='>=3.6',
     install_requires=[
-        'requests',
-        'websocket-client',
-        'websockets'
+        'aiohttp'
     ], 
 )

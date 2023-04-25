@@ -1,9 +1,10 @@
+import asyncio
 import time
 import hmac
 import hashlib
 import json
 import logging
-import requests
+import aiohttp
 
 from datetime import datetime as dt
 
@@ -55,7 +56,7 @@ class _HTTPManager:
         self.api_secret = api_secret
 
         # Set timeout.
-        self.timeout = request_timeout
+        self.timeout = aiohttp.ClientTimeout(total = request_timeout)
         self.recv_window = recv_window
         self.force_retry = force_retry
         self.max_retries = max_retries
@@ -73,26 +74,27 @@ class _HTTPManager:
         else:
             self.ignore_codes = ignore_codes
 
-        # Initialize requests session.
-        self.client = requests.Session()
-        self.client.headers.update(
-            {
-                "User-Agent": "pybit-" + VERSION,
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            }
-        )
-        for key, value in session_params.items():
-            setattr(self.client, key, value)
-
-        # Add referral ID to header.
         self.referral_id = referral_id
-        if referral_id:
-            self.client.headers.update({"Referer": referral_id})
+        self.session_params = session_params
+        self.session = None
 
         # If true, records and returns the request's elapsed time in a tuple
         # with the response body.
         self.record_request_time = record_request_time
+
+    def _create_session(self):
+        return aiohttp.ClientSession(
+            headers={
+                "User-Agent": "pybit-" + VERSION,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                **({
+                    "Referer": self.referral_id
+                } if self.referral_id else {}),
+            },
+            timeout=self.timeout,
+            **self.session_params,
+        )
 
     def _auth(self, method, params, recv_window):
         """
@@ -158,7 +160,18 @@ class _HTTPManager:
                 return True
         return True
 
-    def _submit_request(self, method=None, path=None, query=None, auth=False):
+    async def _submit_request(
+        self, method=None, path=None, query=None, auth=False
+    ):
+        session = self._create_session()
+        try:
+            return await self._do_request(session, method, path, query, auth)
+        finally:
+            await session.close()
+
+    async def _do_request(
+        self, session, method=None, path=None, query=None, auth=False
+    ):
         """
         Submits the request to the API.
 
@@ -246,9 +259,9 @@ class _HTTPManager:
                 headers = {
                     "Content-Type": "application/x-www-form-urlencoded"
                 }
-                r = self.client.prepare_request(
-                    requests.Request(method, path, params=req_params,
-                                     headers=headers)
+                r = session.request(
+                    method, path,
+                    params = req_params, headers = headers
                 )
             else:
                 if "spot" in path:
@@ -259,9 +272,9 @@ class _HTTPManager:
                     headers = {
                         "Content-Type": "application/x-www-form-urlencoded"
                     }
-                    r = self.client.prepare_request(
-                        requests.Request(method, path + f"?{full_param_str}",
-                                         headers=headers)
+                    r = session.request(
+                        method, path + f"?{full_param_str}",
+                        headers = headers
                     )
                 elif "usdc" in path:
                     headers = {
@@ -272,57 +285,57 @@ class _HTTPManager:
                         "X-BAPI-TIMESTAMP": str(usdc_timestamp),
                         "X-BAPI-RECV-WINDOW": str(recv_window)
                     }
-                    r = self.client.prepare_request(
-                        requests.Request(method, path,
-                                         data=json.dumps(req_params),
-                                         headers=headers)
+                    r = session.request(
+                        method, path,
+                        json = req_params, headers = headers
                     )
                 else:
-                    r = self.client.prepare_request(
-                        requests.Request(method, path,
-                                         data=json.dumps(req_params))
+                    r = session.request(
+                        method, path,
+                        json = req_params
                     )
 
             # Attempt the request.
             try:
-                s = self.client.send(r, timeout=self.timeout)
+                start_time = asyncio.get_event_loop().time()
+                s = await r
+                elapsed = asyncio.get_event_loop().time() - start_time
 
             # If requests fires an error, retry.
             except (
-                requests.exceptions.ReadTimeout,
-                requests.exceptions.SSLError,
-                requests.exceptions.ConnectionError
+                aiohttp.ClientConnectionError,
+                aiohttp.ServerConnectionError
             ) as e:
                 if self.force_retry:
                     self.logger.error(f"{e}. {retries_remaining}")
-                    time.sleep(self.retry_delay)
+                    await asyncio.sleep(self.retry_delay)
                     continue
                 else:
                     raise e
 
             # Check HTTP status code before trying to decode JSON.
-            if s.status_code != 200:
-                if s.status_code == 403:
+            if s.status != 200:
+                if s.status == 403:
                     error_msg = "You have breached the IP rate limit."
                 else:
                     error_msg = "HTTP status code is not 200."
-                self.logger.debug(f"Response text: {s.text}")
+                self.logger.debug(f"Response text: {await s.text()}")
                 raise FailedRequestError(
                     request=f"{method} {path}: {req_params}",
                     message=error_msg,
-                    status_code=s.status_code,
+                    status_code=s.status,
                     time=dt.utcnow().strftime("%H:%M:%S")
                 )
 
             # Convert response to dictionary, or raise if requests error.
             try:
-                s_json = s.json()
+                s_json = await s.json()
 
             # If we have trouble converting, handle the error and retry.
             except JSONDecodeError as e:
                 if self.force_retry:
                     self.logger.error(f"{e}. {retries_remaining}")
-                    time.sleep(self.retry_delay)
+                    await asyncio.sleep(self.retry_delay)
                     continue
                 else:
                     self.logger.debug(f"Response text: {s.text}")
@@ -379,7 +392,7 @@ class _HTTPManager:
 
                     # Log the error.
                     self.logger.error(f"{error_msg}. {retries_remaining}")
-                    time.sleep(err_delay)
+                    await asyncio.sleep(err_delay)
                     continue
 
                 elif s_json[ret_code] in self.ignore_codes:
@@ -394,7 +407,7 @@ class _HTTPManager:
                     )
             else:
                 if self.record_request_time:
-                    return s_json, s.elapsed
+                    return s_json, elapsed
                 else:
                     return s_json
 

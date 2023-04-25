@@ -1,3 +1,4 @@
+import asyncio
 import time
 import re
 import copy
@@ -36,3 +37,11 @@ def make_public_kwargs(private_kwargs):
     public_kwargs.pop("api_key", "")
     public_kwargs.pop("api_secret", "")
     return public_kwargs
+
+
+def propagate_future_exception(future):
+    if future.exception(): raise future.exception()
+
+def fire_and_forget(coro, loop):
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    future.add_done_callback(propagate_future_exception)
