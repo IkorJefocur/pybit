@@ -101,7 +101,10 @@ class _WebSocketManager:
         return True
 
     def _connect(self, url):
-        self.loop = self.main_loop or asyncio.get_event_loop()
+        try:
+            self.loop = self.main_loop or asyncio.get_running_loop()
+        except RuntimeError:
+            self.loop = self.thread_loop
         if not self.thread.is_alive():
             self.thread.start()
 
@@ -247,7 +250,7 @@ class _WebSocketManager:
 
     def subscribe(self, *args, **kwargs):
         coro = self._subscribe(*args, **kwargs)
-        if self.loop.is_running:
+        if self.loop.is_running():
             _helpers.fire_and_forget(coro, self.loop)
         else:
             self.loop.run_until_complete(coro)
@@ -375,7 +378,7 @@ class _FuturesWebSocketManager(_WebSocketManager):
             self.auth = True
         # If we get unsuccessful auth, notify user.
         elif message.get("success") is False:
-            logger.debug(f"Authorization for {self.ws_name} failed. Please "
+            logger.warn(f"Authorization for {self.ws_name} failed. Please "
                          f"check your API keys and restart.")
 
     def _process_subscription_message(self, message):
