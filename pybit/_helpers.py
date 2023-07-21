@@ -1,7 +1,6 @@
 import asyncio
 import time
 import re
-import copy
 
 
 def generate_timestamp():
@@ -33,7 +32,7 @@ def find_index(source, target, key):
 
 
 def make_public_kwargs(private_kwargs):
-    public_kwargs = copy.deepcopy(private_kwargs)
+    public_kwargs = {**private_kwargs}
     public_kwargs.pop("api_key", "")
     public_kwargs.pop("api_secret", "")
     return public_kwargs
