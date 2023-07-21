@@ -25,7 +25,7 @@ class _HTTPManager:
                  request_timeout=10, recv_window=5000, force_retry=False,
                  retry_codes=None, ignore_codes=None, max_retries=3,
                  retry_delay=3, referral_id=None, record_request_time=False,
-                 **session_params):
+                 connector=lambda: None, **session_params):
         """Initializes the HTTP class."""
 
         # Set the endpoint.
@@ -75,6 +75,7 @@ class _HTTPManager:
             self.ignore_codes = ignore_codes
 
         self.referral_id = referral_id
+        self.connector = connector
         self.session_params = session_params
         self.session = None
 
@@ -93,6 +94,7 @@ class _HTTPManager:
                 } if self.referral_id else {}),
             },
             timeout=self.timeout,
+            connector=self.connector(),
             **self.session_params,
         )
 

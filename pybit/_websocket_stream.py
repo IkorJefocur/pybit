@@ -36,10 +36,11 @@ class _WebSocketManager:
                  test, domain="", api_key=None, api_secret=None,
                  ping_interval=20, ping_timeout=10, retries=10,
                  restart_on_error=True, trace_logging=False, loop=None,
-                 **session_params):
+                 connector=lambda: None, **session_params):
 
         self.test = test
         self.domain = domain
+        self.connector = connector
         self.session_params = session_params
 
         # Set API keys.
@@ -123,7 +124,10 @@ class _WebSocketManager:
                 await self.ws.send_json(subscription_message)
 
         self.attempting_connection = True
-        self.session = aiohttp.ClientSession(**self.session_params)
+        self.session = aiohttp.ClientSession(
+            connector=self.connector(),
+            **self.session_params
+        )
 
         # Set endpoint.
         subdomain = SUBDOMAIN_TESTNET if self.test else SUBDOMAIN_MAINNET
