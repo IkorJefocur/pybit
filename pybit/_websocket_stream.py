@@ -160,7 +160,7 @@ class _WebSocketManager:
                 retries -= 1
                 # If connection was not successful, raise error.
                 if not infinitely_reconnect and retries <= 0:
-                    self.exit()
+                    await self.exit()
                     raise aiohttp.ClientConnectionError(
                         f"WebSocket {self.ws_name} connection failed. "
                         f"Too many connection attempts. "
@@ -248,7 +248,8 @@ class _WebSocketManager:
         """
         Closes the websocket connection.
         """
-        await self.ws.close()
+        if self.ws:
+            await self.ws.close()
         await self.session.close()
         self.exited = True
 
