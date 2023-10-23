@@ -25,11 +25,10 @@ setup(
         "Programming Language :: Python :: 3.10",
     ],
     keywords="bybit api connector",
-    packages=["pybit", "pybit.legacy"],
+    packages=["pybit"],
     python_requires=">=3.6",
     install_requires=[
-        "requests",
-        "websocket-client",
-        "websockets",
-    ],
+        "aiohttp",
+        "pycryptodome"
+    ]
 )

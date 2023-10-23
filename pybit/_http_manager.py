@@ -1,15 +1,10 @@
+import asyncio
 from collections import defaultdict
 from dataclasses import dataclass, field
-import time
-import hmac
-import hashlib
-from Crypto.Hash import SHA256
-from Crypto.PublicKey import RSA
-from Crypto.Signature import PKCS1_v1_5
-import base64
 import json
 import logging
-import requests
+import aiohttp
+from typing import Callable
 
 from datetime import datetime as dt
 
@@ -29,33 +24,9 @@ DOMAIN_MAIN = "bybit"
 DOMAIN_ALT = "bytick"
 
 
-def generate_signature(use_rsa_authentication, secret, param_str):
-    def generate_hmac():
-        hash = hmac.new(
-            bytes(secret, "utf-8"),
-            param_str.encode("utf-8"),
-            hashlib.sha256,
-        )
-        return hash.hexdigest()
-
-    def generate_rsa():
-        hash = SHA256.new(param_str.encode("utf-8"))
-        encoded_signature = base64.b64encode(
-            PKCS1_v1_5.new(RSA.importKey(secret)).sign(
-                hash
-            )
-        )
-        return encoded_signature.decode()
-
-    if not use_rsa_authentication:
-        return generate_hmac()
-    else:
-        return generate_rsa()
-
-
 @dataclass
 class _V5HTTPManager:
-    testnet: bool = field(default=False)
+    testnet: bool = field()
     domain: str = field(default=DOMAIN_MAIN)
     rsa_authentication: str = field(default=False)
     api_key: str = field(default=None)
@@ -78,6 +49,9 @@ class _V5HTTPManager:
     referral_id: bool = field(default=None)
     record_request_time: bool = field(default=False)
     return_response_headers: bool = field(default=False)
+    connector: Callable[[], aiohttp.BaseConnector|None] = field(
+        default=lambda: None
+    )
 
     def __post_init__(self):
         subdomain = SUBDOMAIN_TESTNET if self.testnet else SUBDOMAIN_MAINNET
@@ -90,7 +64,7 @@ class _V5HTTPManager:
         if not self.retry_codes:
             self.retry_codes = {10002, 10006, 30034, 30035, 130035, 130150}
         self.logger = logging.getLogger(__name__)
-        if len(logging.root.handlers) == 0:
+        if len(self.logger.handlers) == 0 and len(logging.root.handlers) == 0:
             # no handler on root logger set -> we add handler just for this logger to not mess with custom logic from outside
             handler = logging.StreamHandler()
             handler.setFormatter(
@@ -104,15 +78,18 @@ class _V5HTTPManager:
 
         self.logger.debug("Initializing HTTP session.")
 
-        self.client = requests.Session()
-        self.client.headers.update(
-            {
+        self.timeout = aiohttp.ClientTimeout(total = self.timeout)
+
+    async def _create_session(self):
+        return aiohttp.ClientSession(
+            headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-            }
+                **({"Referer": self.referral_id} if self.referral_id else {}),
+            },
+            timeout=self.timeout,
+            connector=self.connector()
         )
-        if self.referral_id:
-            self.client.headers.update({"Referer": self.referral_id})
 
     @staticmethod
     def prepare_payload(method, parameters):
@@ -146,7 +123,7 @@ class _V5HTTPManager:
                 ]
             )
             return payload
-        else:
+        if method == "POST":
             cast_values()
             return json.dumps(parameters)
 
@@ -160,20 +137,17 @@ class _V5HTTPManager:
 
         param_str = str(timestamp) + self.api_key + str(recv_window) + payload
 
-        return generate_signature(
+        return _helpers.generate_signature(
             self.rsa_authentication, self.api_secret, param_str
         )
 
-    @staticmethod
-    def _verify_string(params, key):
-        if key in params:
-            if not isinstance(params[key], str):
-                return False
-            else:
-                return True
-        return True
+    async def _submit_request(self, *args, **kwargs):
+        async with await self._create_session() as session:
+            return await self._do_request(session, *args, **kwargs)
 
-    def _submit_request(self, method=None, path=None, query=None, auth=False):
+    async def _do_request(
+        self, session, method=None, path=None, query=None, auth=False
+    ):
         """
         Submits the request to the API.
 
@@ -249,65 +223,53 @@ class _V5HTTPManager:
                         f"Request -> {method} {path}. Headers: {headers}"
                     )
 
-            if method == "GET":
-                if req_params:
-                    r = self.client.prepare_request(
-                        requests.Request(
-                            method, path + f"?{req_params}", headers=headers
-                        )
-                    )
-                else:
-                    r = self.client.prepare_request(
-                        requests.Request(method, path, headers=headers)
-                    )
-            else:
-                r = self.client.prepare_request(
-                    requests.Request(
-                        method, path, data=req_params, headers=headers
-                    )
-                )
-
             # Attempt the request.
             try:
-                s = self.client.send(r, timeout=self.timeout)
+                start_time = asyncio.get_event_loop().time()
+                s = await session.request(
+                    method, path,
+                    params=req_params if method == "GET" else None,
+                    data=req_params if method == "POST" else None,
+                    headers=headers
+                )
+                elapsed = asyncio.get_event_loop().time() - start_time
 
             # If requests fires an error, retry.
             except (
-                requests.exceptions.ReadTimeout,
-                requests.exceptions.SSLError,
-                requests.exceptions.ConnectionError,
+                aiohttp.ClientConnectionError,
+                aiohttp.ServerConnectionError
             ) as e:
                 if self.force_retry:
                     self.logger.error(f"{e}. {retries_remaining}")
-                    time.sleep(self.retry_delay)
+                    await asyncio.sleep(self.retry_delay)
                     continue
                 else:
                     raise e
 
             # Check HTTP status code before trying to decode JSON.
-            if s.status_code != 200:
-                if s.status_code == 403:
+            if s.status != 200:
+                if s.status == 403:
                     error_msg = "You have breached the IP rate limit or your IP is from the USA."
                 else:
                     error_msg = "HTTP status code is not 200."
-                self.logger.debug(f"Response text: {s.text}")
+                self.logger.debug(f"Response text: {await s.text()}")
                 raise FailedRequestError(
                     request=f"{method} {path}: {req_params}",
                     message=error_msg,
-                    status_code=s.status_code,
+                    status_code=s.status,
                     time=dt.utcnow().strftime("%H:%M:%S"),
                     resp_headers=s.headers,
                 )
 
             # Convert response to dictionary, or raise if requests error.
             try:
-                s_json = s.json()
+                s_json = await s.json()
 
             # If we have trouble converting, handle the error and retry.
             except JSONDecodeError as e:
                 if self.force_retry:
                     self.logger.error(f"{e}. {retries_remaining}")
-                    time.sleep(self.retry_delay)
+                    await asyncio.sleep(self.retry_delay)
                     continue
                 else:
                     self.logger.debug(f"Response text: {s.text}")
@@ -378,8 +340,8 @@ class _V5HTTPManager:
                     )
 
                 if self.return_response_headers:
-                    return s_json, s.elapsed, s.headers,
+                    return s_json, elapsed, s.headers
                 elif self.record_request_time:
-                    return s_json, s.elapsed
+                    return s_json, elapsed
                 else:
                     return s_json

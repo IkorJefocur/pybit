@@ -1,6 +1,12 @@
+import asyncio
 import time
 import re
-import copy
+import hmac
+import hashlib
+from Crypto.Hash import SHA256
+from Crypto.PublicKey import RSA
+from Crypto.Signature import PKCS1_v1_5
+import base64
 
 
 def generate_timestamp():
@@ -8,6 +14,30 @@ def generate_timestamp():
     Return a millisecond integer timestamp.
     """
     return int(time.time() * 10**3)
+
+
+def generate_signature(use_rsa_authentication, secret, param_str):
+    def generate_hmac():
+        hash = hmac.new(
+            bytes(secret, "utf-8"),
+            param_str.encode("utf-8"),
+            hashlib.sha256,
+        )
+        return hash.hexdigest()
+
+    def generate_rsa():
+        hash = SHA256.new(param_str.encode("utf-8"))
+        encoded_signature = base64.b64encode(
+            PKCS1_v1_5.new(RSA.importKey(secret)).sign(
+                hash
+            )
+        )
+        return encoded_signature.decode()
+
+    if not use_rsa_authentication:
+        return generate_hmac()
+    else:
+        return generate_rsa()
 
 
 def identify_ws_method(input_wss_url, wss_dictionary):
@@ -42,7 +72,7 @@ def make_private_args(args):
 
 
 def make_public_kwargs(private_kwargs):
-    public_kwargs = copy.deepcopy(private_kwargs)
+    public_kwargs = {**private_kwargs}
     public_kwargs.pop("api_key", "")
     public_kwargs.pop("api_secret", "")
     return public_kwargs
@@ -73,3 +103,11 @@ def is_usdc_perpetual(symbol: str):
 def is_usdc_option(symbol: str):
     if re.search(r"[A-Z]{3}-.*-[PC]$", symbol):
         return True
+
+
+def propagate_future_exception(future):
+    if future.exception(): raise future.exception()
+
+def fire_and_forget(coro, loop):
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    future.add_done_callback(propagate_future_exception)
