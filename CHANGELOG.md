@@ -5,10 +5,176 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+
+## [5.6.1] - 2023-10-09
+### Changed
+- Improved the IP rate limit error message to indicate that an HTTP status code 403 may also mean that the IP address was identified as being from the USA – all requests from USA IPs are [banned](https://t.me/BybitAPI/180420) by Bybit.
+
+
+## [5.6.0] - 2023-09-28
+### Added
+- Add RSA authentication for HTTP and WebSocket (choose "Self-generated API Keys" when [creating](https://testnet.bybit.com/app/user/api-management) an API key)
+  - To use it, pass `rsa_authentication=True` along with your `api_key` and `api_secret`
+    - Your `api_key` is given to you after inputting your public key (RSA) into Bybit's API management system
+    - Your `api_secret` is the private key (RSA) you generate
+  - Learn more [here](https://www.bybit.com/en-US/help-center/bybitHC_Article?id=000001923&language=en_US)
+  - See examples files: [HTTP](https://github.com/bybit-exchange/pybit/blob/master/examples/http_example_rsa_authentication.py) and [WebSocket](https://github.com/bybit-exchange/pybit/blob/master/examples/websocket_example_rsa_authentication.py)
+- Add the `HTTP` method `get_server_time()`
+- Add `HTTP` methods for spot margin trading
+- Add `HTTP` method `get_long_short_ratio()`
+- Add optional `private_auth_expire` arg for WebSocket (https://github.com/bybit-exchange/pybit/pull/154)
+
+### Deprecated
+- The `HTTP` method `enable_universal_transfer_for_sub_uid()`
+
+### Fixed
+- Improve `close_position` logic
+
+## [5.5.0] - 2023-07-17
+### Added
+- `helpers.py` which includes the `Helpers` class and the `close_position` method, which can be imported and employed like so:
+```python
+from pybit.helpers import Helpers
+my_helper = Helpers(session)  # your HTTP session object (eg, from pybit.unified_trading import HTTP)
+print(my_helper.close_position(category="linear", symbol="BTCUSDT"))
+```
+
+## [5.4.0] - 2023-06-23
+### Added
+- The following new endpoints to `unified_trading`:
+  - `get_broker_earnings`
+  - `get_announcement`
+  - `get_pre_upgrade_order_history`
+  - `get_pre_upgrade_trade_history`
+  - `get_pre_upgrade_closed_pnl`
+  - `get_pre_upgrade_transaction_log`
+  - `get_pre_upgrade_option_delivery_record`
+  - `get_pre_upgrade_usdc_session_settlement`
+  - `get_affiliate_user_info`
+  - `get_uid_wallet_type`
+
+
+## [5.3.0] - 2023-05-19
+### Added
+- Multiple symbol support for WebSocket topics (pass `symbol` as a list)
+- Extra logging (log response headers) when passing `log_requests=True`
+- Argument `return_response_headers` for `HTTP` to allow returning the response headers to the user
+
+### Modified
+- Add response headers to exceptions
+
+### Fixed
+- Update PyPI package's python version so that only =>3.9 is supported to prevent the error: `TypeError: 'type' object is not subscriptable`
+- Fix API rate limit handling
+- Remove unnecessary `print` statements in two methods
+
+
+## [5.2.0] - 2023-04-18
+### Added
+- New asset endpoints: `set_deposit_account()`, `get_internal_deposit_records()`, `get_withdrawable_amount()`
+
+### Fixed
+- Ensure that `legacy` submodule is packaged by `setup.py`
+- Fix non-UTA (normal account) spot margin trading endpoints
+- Fix wrong request method for `set_dcp()`
+
+
+## [5.1.1] - 2023-04-06
+### Added
+- HTTP endpoints to the `copy_trading` module
+
+### Modified
+- Docstrings in the `copy_trading` module to make it easier to find the API documentation for reference
+- Example files
+
+### Fixed
+- `ticker_stream` method in the `unified_trading` module, which was subscribing to the wrong WebSocket topic
+
+
+## [5.0.0] - 2023-04-03
+This version upgrades pybit to Bybit's [version 5 (v5) APIs](https://bybit-exchange.github.io/docs/v5/intro). It supports both [Unified Trading Accounts](https://www.bybit.com/en-US/help-center/s/article/Introduction-to-Bybit-Unified-Trading-Account) (UTA) and non-UTA accounts. Bybit is not expected to develop any more major API versions in the future, so Bybit's v5 API (and subsequently, pybit's 5.0.0) is expected to be supported in the long-term.
+
+See the [examples folder](https://github.com/bybit-exchange/pybit/tree/master/examples) for examples on how to interact with the latest modules.
+
+### Added
+- Bybit's v5 HTTP and WebSocket APIs in the `unified_trading` module. See what markets All-In-One V5 API supports in the [upgrade guide](https://bybit-exchange.github.io/docs/v5/upgrade-guide).
+
+### Modified
+- Non-v5 modules like `copy_trading`, `usdc_options`, and `usdc_perpetuals` to continue to work from a `legacy` subpackage. Import like so: `from pybit.legacy.copy_trading import HTTP
+`. These modules are maintained because they are currently not supported by the v5 API; see the [upgrade guide](https://bybit-exchange.github.io/docs/v5/upgrade-guide).
+
+### Removed
+- Various legacy modules which have been superseded by the v5 API via the `unified_trading` module
+
+### Fixed
+- Tests for V5 endpoints
+
+
+## [3.0.0rc5] - 2023-02-02
+### Added
+- `copy_trading` module for the [Copy Trading](https://bybit-exchange.github.io/docs/copy_trading/) HTTP API and WebSocket
+
+### Modified
+- `requirements.txt` to require the latest version of `websocket-client`: `1.5.0`.
+  - If you are facing any problems with the WebSocket, ensure you upgrade to the right version of the dependency and try again. Upgrade like so: `python -m pip install -r requirements.txt`
+- WebSocket pings (again)
+
+
+## [3.0.0rc4] - 2023-01-31
+### Modified
+- How WebSocket pings are sent in an effort to keep connections open longer
+
+## [3.0.0rc3] - 2023-01-27
+### Fixed
+- Failure to resubscribe to private spot topics when reconnecting WebSocket
+
+### Modified
+- WebSocket error handling
+
+## [3.0.0rc2] - 2023-01-05
+### Fixed
+- Failure to pass request parameters in certain methods
+
+
+## [3.0.0rc1] - 2023-01-04
+### Fixed
+- Wrong endpoint paths in `spot`
+
+### Modified
+- Refactored WebSocket's `test` arg to `testnet`
+- Hardcoded WebSocket arguments into the child class the user accesses – meaning the user can easily see them, and IDEs should autocomplete them
+  - (For v3 WebSockets only: `contract`, `unified_margin`, `spot`)
+
+
+## [3.0.0rc0] - 2022-12-28
+This version upgrades pybit to Bybit's version 3 (v3) APIs. Some old API modules are maintained due to lack of or only partial support in v3. Method names have been improved and conform to an intuitive standard.
+
+Future modules will be removed as Bybit's APIs are further unified so that they may be accessible from just one or two modules which should generally be divided by account type (eg, unified margin) rather than by market type (eg USDT perpetual).
+
+This is a pre-release, as indicated by the `rc` (release candidate) in the version number. Future versions may have breaking changes. An imminent major version of the Bybit API will introduce major changes before these v3 APIs make it to the production version.
+
+### Added
+- Bybit's main v3 HTTP and WebSocket APIs:
+  - `contract` – inverse perpetuals, inverse futures, USDT perpetuals, and USDC options
+  - `unified_margin` – USDT perpetuals and USDC options
+
+### Modified
+- `spot` to use v3 HTTP API and WebSocket APIs
+- `account_asset` to use v3 HTTP API
+
+### Removed
+- `usdt_perpetual` because it is now accessible via `contract` and `unified_margin`
+
+
+## [2.4.1rc0] - 2022-10-07
+### Modified
+- `is_connected()` and the WebSocket reconnection logic. 
+
+
 ## [2.4.1] - 2022-10-07
 - See below release candidates for further changes.
 
-## Fixed
+### Fixed
 - Wrong endpoint path in `usdc_perpetual.py`
 - Wrong endpoint path in `account_asset.py`
 

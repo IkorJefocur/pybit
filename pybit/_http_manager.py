@@ -1,15 +1,14 @@
 import asyncio
-import time
-import hmac
-import hashlib
+from collections import defaultdict
+from dataclasses import dataclass, field
 import json
 import logging
 import aiohttp
+from typing import Callable
 
 from datetime import datetime as dt
 
 from .exceptions import FailedRequestError, InvalidRequestError
-from . import VERSION
 from . import _helpers
 
 # Requests will use simplejson if available.
@@ -18,158 +17,133 @@ try:
 except ImportError:
     from json.decoder import JSONDecodeError
 
+HTTP_URL = "https://{SUBDOMAIN}.{DOMAIN}.com"
+SUBDOMAIN_TESTNET = "api-testnet"
+SUBDOMAIN_MAINNET = "api"
+DOMAIN_MAIN = "bybit"
+DOMAIN_ALT = "bytick"
 
-class _HTTPManager:
-    def __init__(self, endpoint=None, api_key=None, api_secret=None,
-                 logging_level=logging.INFO, log_requests=False,
-                 request_timeout=10, recv_window=5000, force_retry=False,
-                 retry_codes=None, ignore_codes=None, max_retries=3,
-                 retry_delay=3, referral_id=None, record_request_time=False,
-                 connector=lambda: None, **session_params):
-        """Initializes the HTTP class."""
 
-        # Set the endpoint.
-        if endpoint is None:
-            self.endpoint = "https://api.bybit.com"
-        else:
-            self.endpoint = endpoint
+@dataclass
+class _V5HTTPManager:
+    testnet: bool = field()
+    domain: str = field(default=DOMAIN_MAIN)
+    rsa_authentication: str = field(default=False)
+    api_key: str = field(default=None)
+    api_secret: str = field(default=None)
+    logging_level: logging = field(default=logging.INFO)
+    log_requests: bool = field(default=False)
+    timeout: int = field(default=10)
+    recv_window: bool = field(default=5000)
+    force_retry: bool = field(default=False)
+    retry_codes: defaultdict[dict] = field(
+        default_factory=dict,
+        init=False,
+    )
+    ignore_codes: dict = field(
+        default_factory=dict,
+        init=False,
+    )
+    max_retries: bool = field(default=3)
+    retry_delay: bool = field(default=3)
+    referral_id: bool = field(default=None)
+    record_request_time: bool = field(default=False)
+    return_response_headers: bool = field(default=False)
+    connector: Callable[[], aiohttp.BaseConnector|None] = field(
+        default=lambda: None
+    )
 
-        # Setup logger.
+    def __post_init__(self):
+        subdomain = SUBDOMAIN_TESTNET if self.testnet else SUBDOMAIN_MAINNET
+        domain = DOMAIN_MAIN if not self.domain else self.domain
+        url = HTTP_URL.format(SUBDOMAIN=subdomain, DOMAIN=domain)
+        self.endpoint = url
 
+        if not self.ignore_codes:
+            self.ignore_codes = set()
+        if not self.retry_codes:
+            self.retry_codes = {10002, 10006, 30034, 30035, 130035, 130150}
         self.logger = logging.getLogger(__name__)
-
         if len(self.logger.handlers) == 0 and len(logging.root.handlers) == 0:
-            #no handler on root logger set -> we add handler just for this logger to not mess with custom logic from outside
+            # no handler on root logger set -> we add handler just for this logger to not mess with custom logic from outside
             handler = logging.StreamHandler()
-            handler.setFormatter(logging.Formatter(fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-                                                   datefmt="%Y-%m-%d %H:%M:%S"
-                                                   )
-                                 )
-            handler.setLevel(logging_level)
+            handler.setFormatter(
+                logging.Formatter(
+                    fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+                    datefmt="%Y-%m-%d %H:%M:%S",
+                )
+            )
+            handler.setLevel(self.logging_level)
             self.logger.addHandler(handler)
 
         self.logger.debug("Initializing HTTP session.")
-        self.log_requests = log_requests
 
-        # Set API keys.
-        self.api_key = api_key
-        self.api_secret = api_secret
+        self.timeout = aiohttp.ClientTimeout(total = self.timeout)
 
-        # Set timeout.
-        self.timeout = aiohttp.ClientTimeout(total = request_timeout)
-        self.recv_window = recv_window
-        self.force_retry = force_retry
-        self.max_retries = max_retries
-        self.retry_delay = retry_delay
-
-        # Set whitelist of non-fatal Bybit status codes to retry on.
-        if retry_codes is None:
-            self.retry_codes = {10002, 10006, 30034, 30035, 130035, 130150}
-        else:
-            self.retry_codes = retry_codes
-
-        # Set whitelist of non-fatal Bybit status codes to ignore.
-        if ignore_codes is None:
-            self.ignore_codes = set()
-        else:
-            self.ignore_codes = ignore_codes
-
-        self.referral_id = referral_id
-        self.connector = connector
-        self.session_params = session_params
-        self.session = None
-
-        # If true, records and returns the request's elapsed time in a tuple
-        # with the response body.
-        self.record_request_time = record_request_time
-
-    def _create_session(self):
+    async def _create_session(self):
         return aiohttp.ClientSession(
             headers={
-                "User-Agent": "pybit-" + VERSION,
                 "Content-Type": "application/json",
                 "Accept": "application/json",
-                **({
-                    "Referer": self.referral_id
-                } if self.referral_id else {}),
+                **({"Referer": self.referral_id} if self.referral_id else {}),
             },
             timeout=self.timeout,
-            connector=self.connector(),
-            **self.session_params,
+            connector=self.connector()
         )
-
-    def _auth(self, method, params, recv_window):
-        """
-        Generates authentication signature per Bybit API specifications.
-
-        Notes
-        -------------------
-        Since the POST method requires a JSONified dict, we need to ensure
-        the signature uses lowercase booleans instead of Python's
-        capitalized booleans. This is done in the bug fix below.
-
-        """
-
-        api_key = self.api_key
-        api_secret = self.api_secret
-
-        if api_key is None or api_secret is None:
-            raise PermissionError("Authenticated endpoints require keys.")
-
-        # Append required parameters.
-        params["api_key"] = api_key
-        params["recv_window"] = recv_window
-        params["timestamp"] = _helpers.generate_timestamp()
-
-        # Sort dictionary alphabetically to create querystring.
-        _val = "&".join(
-            [str(k) + "=" + str(v) for k, v in sorted(params.items()) if
-             (k != "sign") and (v is not None)]
-        )
-
-        # Bug fix. Replaces all capitalized booleans with lowercase.
-        if method == "POST":
-            _val = _val.replace("True", "true").replace("False", "false")
-
-        # Return signature.
-        return str(hmac.new(
-            bytes(api_secret, "utf-8"),
-            bytes(_val, "utf-8"), digestmod="sha256"
-        ).hexdigest())
-
-    def _usdc_auth(self, params, recv_window, timestamp):
-        """
-        Generates authentication signature per Bybit API specifications.
-        """
-
-        api_key = self.api_key
-        api_secret = self.api_secret
-
-        if api_key is None or api_secret is None:
-            raise PermissionError("Authenticated endpoints require keys.")
-        payload = json.dumps(params)
-        param_str = str(timestamp) + api_key + str(recv_window) + payload
-        hash = hmac.new(bytes(api_secret, "utf-8"), param_str.encode("utf-8"),
-                        hashlib.sha256)
-        return hash.hexdigest()
 
     @staticmethod
-    def _verify_string(params, key):
-        if key in params:
-            if not isinstance(params[key], str):
-                return False
-            else:
-                return True
-        return True
+    def prepare_payload(method, parameters):
+        """
+        Prepares the request payload and validates parameter value types.
+        """
 
-    async def _submit_request(
-        self, method=None, path=None, query=None, auth=False
-    ):
-        session = self._create_session()
-        try:
-            return await self._do_request(session, method, path, query, auth)
-        finally:
-            await session.close()
+        def cast_values():
+            string_params = [
+                "qty",
+                "price",
+                "triggerPrice",
+                "takeProfit",
+                "stopLoss",
+            ]
+            integer_params = ["positionIdx"]
+            for key, value in parameters.items():
+                if key in string_params:
+                    if type(value) != str:
+                        parameters[key] = str(value)
+                elif key in integer_params:
+                    if type(value) != int:
+                        parameters[key] = int(value)
+
+        if method == "GET":
+            payload = "&".join(
+                [
+                    str(k) + "=" + str(v)
+                    for k, v in sorted(parameters.items())
+                    if v is not None
+                ]
+            )
+            return payload
+        if method == "POST":
+            cast_values()
+            return json.dumps(parameters)
+
+    def _auth(self, payload, recv_window, timestamp):
+        """
+        Prepares authentication signature per Bybit API specifications.
+        """
+
+        if self.api_key is None or self.api_secret is None:
+            raise PermissionError("Authenticated endpoints require keys.")
+
+        param_str = str(timestamp) + self.api_key + str(recv_window) + payload
+
+        return _helpers.generate_signature(
+            self.rsa_authentication, self.api_secret, param_str
+        )
+
+    async def _submit_request(self, *args, **kwargs):
+        async with await self._create_session() as session:
+            return await self._do_request(session, *args, **kwargs)
 
     async def _do_request(
         self, session, method=None, path=None, query=None, auth=False
@@ -188,13 +162,6 @@ class _HTTPManager:
         if query is None:
             query = {}
 
-        # Add agentSource (spot API's Referer).
-        if self.referral_id and method == "POST" and path.endswith("/spot/v1/order"):
-            query["agentSource"] = self.referral_id
-
-        # Remove internal spot arg
-        query.pop("spot", "")
-
         # Store original recv_window.
         recv_window = self.recv_window
 
@@ -210,97 +177,61 @@ class _HTTPManager:
         req_params = None
 
         while True:
-
             retries_attempted -= 1
             if retries_attempted < 0:
                 raise FailedRequestError(
                     request=f"{method} {path}: {req_params}",
                     message="Bad Request. Retries exceeded maximum.",
                     status_code=400,
-                    time=dt.utcnow().strftime("%H:%M:%S")
+                    time=dt.utcnow().strftime("%H:%M:%S"),
+                    resp_headers=None,
                 )
 
             retries_remaining = f"{retries_attempted} retries remain."
 
+            req_params = self.prepare_payload(method, query)
+
             # Authenticate if we are using a private endpoint.
             if auth:
-                if "usdc" in path:
-                    # Prepare signature.
-                    usdc_timestamp = _helpers.generate_timestamp()
-                    signature = self._usdc_auth(
-                        params=query,
-                        recv_window=recv_window,
-                        timestamp=usdc_timestamp,
-                    )
-                else:
-                    # Prepare signature.
-                    signature = self._auth(
-                        method=method,
-                        params=query,
-                        recv_window=recv_window,
-                    )
-                    # Sort the dictionary alphabetically.
-                    query = dict(sorted(query.items(), key=lambda x: x))
-                    # Append the signature to the dictionary.
-                    query["sign"] = signature
-
-            # Define parameters and log the request.
-            if query is not None:
-                req_params = {k: v for k, v in query.items() if
-                              v is not None}
-
+                # Prepare signature.
+                timestamp = _helpers.generate_timestamp()
+                signature = self._auth(
+                    payload=req_params,
+                    recv_window=recv_window,
+                    timestamp=timestamp,
+                )
+                headers = {
+                    "Content-Type": "application/json",
+                    "X-BAPI-API-KEY": self.api_key,
+                    "X-BAPI-SIGN": signature,
+                    "X-BAPI-SIGN-TYPE": "2",
+                    "X-BAPI-TIMESTAMP": str(timestamp),
+                    "X-BAPI-RECV-WINDOW": str(recv_window),
+                }
             else:
-                req_params = {}
+                headers = {}
 
             # Log the request.
             if self.log_requests:
-                self.logger.debug(f"Request -> {method} {path}: {req_params}")
-
-            # Prepare request; use "params" for GET and "data" for POST.
-            if method == "GET":
-                headers = {
-                    "Content-Type": "application/x-www-form-urlencoded"
-                }
-                r = session.request(
-                    method, path,
-                    params = req_params, headers = headers
-                )
-            else:
-                if "spot" in path:
-                    full_param_str = "&".join(
-                        [str(k) + "=" + str(v) for k, v in
-                         sorted(query.items()) if v is not None]
-                    )
-                    headers = {
-                        "Content-Type": "application/x-www-form-urlencoded"
-                    }
-                    r = session.request(
-                        method, path + f"?{full_param_str}",
-                        headers = headers
-                    )
-                elif "usdc" in path:
-                    headers = {
-                        "Content-Type": "application/json",
-                        "X-BAPI-API-KEY": self.api_key,
-                        "X-BAPI-SIGN": signature,
-                        "X-BAPI-SIGN-TYPE": "2",
-                        "X-BAPI-TIMESTAMP": str(usdc_timestamp),
-                        "X-BAPI-RECV-WINDOW": str(recv_window)
-                    }
-                    r = session.request(
-                        method, path,
-                        json = req_params, headers = headers
+                if req_params:
+                    self.logger.debug(
+                        f"Request -> {method} {path}. Body: {req_params}. "
+                        f"Headers: {headers}"
                     )
                 else:
-                    r = session.request(
-                        method, path,
-                        json = req_params
+                    self.logger.debug(
+                        f"Request -> {method} {path}. Headers: {headers}"
                     )
 
             # Attempt the request.
             try:
                 start_time = asyncio.get_event_loop().time()
-                s = await r
+                s = await session.request(
+                    method, path,
+                    params=req_params if method == "GET" else None,
+                    data=req_params if method == "POST" else None,
+                    headers=headers
+                )
                 elapsed = asyncio.get_event_loop().time() - start_time
 
             # If requests fires an error, retry.
@@ -318,7 +249,7 @@ class _HTTPManager:
             # Check HTTP status code before trying to decode JSON.
             if s.status != 200:
                 if s.status == 403:
-                    error_msg = "You have breached the IP rate limit."
+                    error_msg = "You have breached the IP rate limit or your IP is from the USA."
                 else:
                     error_msg = "HTTP status code is not 200."
                 self.logger.debug(f"Response text: {await s.text()}")
@@ -326,7 +257,8 @@ class _HTTPManager:
                     request=f"{method} {path}: {req_params}",
                     message=error_msg,
                     status_code=s.status,
-                    time=dt.utcnow().strftime("%H:%M:%S")
+                    time=dt.utcnow().strftime("%H:%M:%S"),
+                    resp_headers=s.headers,
                 )
 
             # Convert response to dictionary, or raise if requests error.
@@ -345,56 +277,49 @@ class _HTTPManager:
                         request=f"{method} {path}: {req_params}",
                         message="Conflict. Could not decode JSON.",
                         status_code=409,
-                        time=dt.utcnow().strftime("%H:%M:%S")
+                        time=dt.utcnow().strftime("%H:%M:%S"),
+                        resp_headers=s.headers,
                     )
 
-            ret_code = "retCode" if "retCode" in s_json else "ret_code"
-            ret_msg = "retMsg" if "retMsg" in s_json else "ret_msg"
-            rate_limit_reset = "rateLimitResetMs" \
-                if "rateLimitResetMs" in s_json else "rate_limit_reset_ms"
+            ret_code = "retCode"
+            ret_msg = "retMsg"
 
             # If Bybit returns an error, raise.
             if s_json[ret_code]:
-
                 # Generate error message.
-                error_msg = (
-                    f"{s_json[ret_msg]} (ErrCode: {s_json[ret_code]})"
-                )
+                error_msg = f"{s_json[ret_msg]} (ErrCode: {s_json[ret_code]})"
 
                 # Set default retry delay.
-                err_delay = self.retry_delay
+                delay_time = self.retry_delay
 
                 # Retry non-fatal whitelisted error requests.
                 if s_json[ret_code] in self.retry_codes:
-
                     # 10002, recv_window error; add 2.5 seconds and retry.
                     if s_json[ret_code] == 10002:
                         error_msg += ". Added 2.5 seconds to recv_window"
                         recv_window += 2500
 
-                    # 10006, ratelimit error; wait until rate_limit_reset_ms
-                    # and retry.
+                    # 10006, rate limit error; wait until
+                    # X-Bapi-Limit-Reset-Timestamp and retry.
                     elif s_json[ret_code] == 10006:
                         self.logger.error(
-                            f"{error_msg}. Ratelimited on current request. "
+                            f"{error_msg}. Hit the API rate limit. "
                             f"Sleeping, then trying again. Request: {path}"
                         )
 
-                        # Calculate how long we need to wait.
-                        limit_reset = s_json[rate_limit_reset] / 1000 \
-                            if rate_limit_reset in s_json else time.time() + 1
-                        reset_str = time.strftime(
-                            "%X", time.localtime(limit_reset)
-                        )
-                        err_delay = int(limit_reset) - int(time.time())
+                        # Calculate how long we need to wait in milliseconds.
+                        limit_reset_time = int(s.headers["X-Bapi-Limit-Reset-Timestamp"])
+                        limit_reset_str = dt.fromtimestamp(limit_reset_time / 10**3).strftime(
+                            "%H:%M:%S.%f")[:-3]
+                        delay_time = (int(limit_reset_time) - _helpers.generate_timestamp()) / 10**3
                         error_msg = (
-                            f"Ratelimit will reset at {reset_str}. "
-                            f"Sleeping for {err_delay} seconds"
+                            f"API rate limit will reset at {limit_reset_str}. "
+                            f"Sleeping for {int(delay_time * 10**3)} milliseconds"
                         )
 
                     # Log the error.
                     self.logger.error(f"{error_msg}. {retries_remaining}")
-                    await asyncio.sleep(err_delay)
+                    time.sleep(delay_time)
                     continue
 
                 elif s_json[ret_code] in self.ignore_codes:
@@ -405,483 +330,18 @@ class _HTTPManager:
                         request=f"{method} {path}: {req_params}",
                         message=s_json[ret_msg],
                         status_code=s_json[ret_code],
-                        time=dt.utcnow().strftime("%H:%M:%S")
+                        time=dt.utcnow().strftime("%H:%M:%S"),
+                        resp_headers=s.headers,
                     )
             else:
-                if self.record_request_time:
+                if self.log_requests:
+                    self.logger.debug(
+                        f"Response headers: {s.headers}"
+                    )
+
+                if self.return_response_headers:
+                    return s_json, elapsed, s.headers
+                elif self.record_request_time:
                     return s_json, elapsed
                 else:
                     return s_json
-
-    def api_key_info(self):
-        """
-        Get user's API key info.
-
-        :returns: Request results as dictionary.
-        """
-
-        return self._submit_request(
-            method="GET",
-            path=self.endpoint + "/v2/private/account/api-key",
-            auth=True
-        )
-
-
-class _FuturesHTTPManager(_HTTPManager):
-    def orderbook(self, **kwargs):
-        """
-        Get the orderbook.
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/inverse/#t-orderbook.
-        :returns: Request results as dictionary.
-        """
-
-        suffix = "/v2/public/orderBook/L2"
-        return self._submit_request(
-            method="GET",
-            path=self.endpoint + suffix,
-            query=kwargs
-        )
-
-    def latest_information_for_symbol(self, **kwargs):
-        """
-        Get the latest information for symbol.
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/inverse/#t-latestsymbolinfo.
-        :returns: Request results as dictionary.
-        """
-
-        suffix = "/v2/public/tickers"
-        return self._submit_request(
-            method="GET",
-            path=self.endpoint + suffix,
-            query=kwargs
-        )
-
-    def query_symbol(self):
-        """
-        Get symbol info.
-
-        :returns: Request results as dictionary.
-        """
-
-        suffix = "/v2/public/symbols"
-        return self._submit_request(
-            method="GET",
-            path=self.endpoint + suffix
-        )
-
-    def liquidated_orders(self, **kwargs):
-        """
-        Retrieve the liquidated orders. The query range is the last seven days
-        of data.
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/inverse/#t-query_liqrecords.
-        :returns: Request results as dictionary.
-        """
-
-        # Replace query param "from_id" since "from" keyword is reserved.
-        # Temporary workaround until Bybit updates official request params
-        if "from_id" in kwargs:
-            kwargs["from"] = kwargs.pop("from_id")
-
-        return self._submit_request(
-            method="GET",
-            path=self.endpoint + "/v2/public/liq-records",
-            query=kwargs
-        )
-
-    def open_interest(self, **kwargs):
-        """
-        Gets the total amount of unsettled contracts. In other words, the total
-        number of contracts held in open positions.
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/inverse/#t-marketopeninterest.
-        :returns: Request results as dictionary.
-        """
-
-        return self._submit_request(
-            method="GET",
-            path=self.endpoint + "/v2/public/open-interest",
-            query=kwargs
-        )
-
-    def latest_big_deal(self, **kwargs):
-        """
-        Obtain filled orders worth more than 500,000 USD within the last 24h.
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/inverse/#t-marketbigdeal.
-        :returns: Request results as dictionary.
-        """
-
-        return self._submit_request(
-            method="GET",
-            path=self.endpoint + "/v2/public/big-deal",
-            query=kwargs
-        )
-
-    def long_short_ratio(self, **kwargs):
-        """
-        Gets the Bybit long-short ratio.
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/inverse/#t-marketaccountratio.
-        :returns: Request results as dictionary.
-        """
-
-        return self._submit_request(
-            method="GET",
-            path=self.endpoint + "/v2/public/account-ratio",
-            query=kwargs
-        )
-
-    def query_trading_fee_rate(self, **kwargs):
-        """
-        Query trading fee rate.
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/inverse/#t-queryfeerate.
-        :returns: Request results as dictionary.
-        """
-        return self._submit_request(
-            method='GET',
-            path=self.endpoint + '/v2/private/position/fee-rate',
-            query=kwargs,
-            auth=True
-        )
-
-    def lcp_info(self, **kwargs):
-        """
-        Get user's LCP (data refreshes once an hour). Only supports inverse
-        perpetual at present. See
-        https://bybit-exchange.github.io/docs/inverse/#t-liquidity to learn
-        more.
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/inverse/#t-lcp.
-        :returns: Request results as dictionary.
-        """
-
-        return self._submit_request(
-            method="GET",
-            path=self.endpoint + "/v2/private/account/lcp",
-            query=kwargs,
-            auth=True
-        )
-
-    def get_wallet_balance(self, **kwargs):
-        """
-        Get wallet balance info.
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/inverse/#t-balance.
-        :returns: Request results as dictionary.
-        """
-
-        suffix = "/v2/private/wallet/balance"
-
-        return self._submit_request(
-            method="GET",
-            path=self.endpoint + suffix,
-            query=kwargs,
-            auth=True
-        )
-
-    def wallet_fund_records(self, **kwargs):
-        """
-        Get wallet fund records. This endpoint also shows exchanges from the
-        Asset Exchange, where the types for the exchange are
-        ExchangeOrderWithdraw and ExchangeOrderDeposit.
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/inverse/#t-walletrecords.
-        :returns: Request results as dictionary.
-        """
-
-        # Replace query param "from_id" since "from" keyword is reserved.
-        # Temporary workaround until Bybit updates official request params
-        if "from_id" in kwargs:
-            kwargs["from"] = kwargs.pop("from_id")
-
-        return self._submit_request(
-            method="GET",
-            path=self.endpoint + "/v2/private/wallet/fund/records",
-            query=kwargs,
-            auth=True
-        )
-
-    def withdraw_records(self, **kwargs):
-        """
-        Get withdrawal records.
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/inverse/#t-withdrawrecords.
-        :returns: Request results as dictionary.
-        """
-
-        return self._submit_request(
-            method="GET",
-            path=self.endpoint + "/v2/private/wallet/withdraw/list",
-            query=kwargs,
-            auth=True
-        )
-
-    def asset_exchange_records(self, **kwargs):
-        """
-        Get asset exchange records.
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/inverse/#t-assetexchangerecords.
-        :returns: Request results as dictionary.
-        """
-
-        return self._submit_request(
-            method="GET",
-            path=self.endpoint + "/v2/private/exchange-order/list",
-            query=kwargs,
-            auth=True
-        )
-
-    def server_time(self):
-        """
-        Get Bybit server time.
-
-        :returns: Request results as dictionary.
-        """
-
-        suffix = "/v2/public/time"
-
-        return self._submit_request(
-            method="GET",
-            path=self.endpoint + suffix
-        )
-
-    def announcement(self):
-        """
-        Get Bybit OpenAPI announcements in the last 30 days by reverse order.
-
-        :returns: Request results as dictionary.
-        """
-
-        return self._submit_request(
-            method="GET",
-            path=self.endpoint + "/v2/public/announcement"
-        )
-
-
-class _InverseFuturesHTTPManager(_FuturesHTTPManager):
-    def query_kline(self, **kwargs):
-        """
-        Get kline.
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/inverse/#t-querykline.
-        :returns: Request results as dictionary.
-        """
-
-        # Replace query param "from_time" since "from" keyword is reserved.
-        # Temporary workaround until Bybit updates official request params
-        if "from_time" in kwargs:
-            kwargs["from"] = kwargs.pop("from_time")
-
-        suffix = "/v2/public/kline/list"
-
-        return self._submit_request(
-            method="GET",
-            path=self.endpoint + suffix,
-            query=kwargs
-        )
-
-    def public_trading_records(self, **kwargs):
-        """
-        Get recent trades. You can find a complete history of trades on Bybit
-        at https://public.bybit.com/.
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/inverse/#t-publictradingrecords.
-        :returns: Request results as dictionary.
-        """
-
-        # Replace query param "from_id" since "from" keyword is reserved.
-        # Temporary workaround until Bybit updates official request params
-        if "from_id" in kwargs:
-            kwargs["from"] = kwargs.pop("from_id")
-
-        suffix = "/v2/public/trading-records"
-
-        return self._submit_request(
-            method="GET",
-            path=self.endpoint + suffix,
-            query=kwargs
-        )
-
-    def get_risk_limit(self, **kwargs):
-        """
-        Get risk limit.
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/inverse/#t-getrisklimit.
-        :returns: Request results as dictionary.
-        """
-
-        suffix = "/v2/public/risk-limit/list"
-
-        return self._submit_request(
-            method="GET",
-            path=self.endpoint + suffix,
-            query=kwargs
-        )
-
-
-class _USDCHTTPManager(_HTTPManager):
-    def last_500_trades(self, **kwargs):
-        """
-        Gets the Bybit long-short ratio.
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/usdc/perpetual/#t-querylatest500trades.
-        :returns: Request results as dictionary.
-        """
-
-        return self._submit_request(
-            method="GET",
-            path=self.endpoint + "/option/usdc/openapi/public/v1/query-trade-latest",
-            query=kwargs
-        )
-
-    def get_active_order(self, **kwargs):
-        """
-        Gets an active order. For more information, see
-        https://bybit-exchange.github.io/docs/usdc/perpetual/#t-usdcqryunorpartfilled.
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/usdc/perpetual/#t-usdcqryunorpartfilled.
-        :returns: Request results as dictionary.
-        """
-
-        suffix = "/option/usdc/openapi/private/v1/query-active-orders"
-
-        return self._submit_request(
-            method="POST",
-            path=self.endpoint + suffix,
-            query=kwargs,
-            auth=True
-        )
-
-    def user_trade_records(self, **kwargs):
-        """
-        Get user's trading records. The results are ordered in ascending order
-        (the first item is the oldest).
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/usdc/perpetual/#t-usdctradehistory.
-        :returns: Request results as dictionary.
-        """
-
-        suffix = "/option/usdc/openapi/private/v1/execution-list"
-
-        return self._submit_request(
-            method="POST",
-            path=self.endpoint + suffix,
-            query=kwargs,
-            auth=True
-        )
-
-    def get_history_order(self, **kwargs):
-        """
-        Gets an active order. For more information, see
-        https://bybit-exchange.github.io/docs/usdc/perpetual/#t-usdcqryorderhistory.
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/usdc/perpetual/#t-usdcqryorderhistory.
-        :returns: Request results as dictionary.
-        """
-
-        suffix = "/option/usdc/openapi/private/v1/query-order-history"
-
-        return self._submit_request(
-            method="POST",
-            path=self.endpoint + suffix,
-            query=kwargs,
-            auth=True
-        )
-
-    def get_wallet_balance(self, **kwargs):
-        """
-        Get wallet balance info.
-        https://bybit-exchange.github.io/docs/usdc/option/#t-usdcaccountinfo
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/usdc/option/#t-usdcaccountinfo.
-        :returns: Request results as dictionary.
-        """
-
-        suffix = "/option/usdc/openapi/private/v1/query-wallet-balance"
-
-        return self._submit_request(
-            method="POST",
-            path=self.endpoint + suffix,
-            query=kwargs,
-            auth=True
-        )
-
-    def get_asset_info(self, **kwargs):
-        """
-        Get Asset info.
-        https://bybit-exchange.github.io/docs/usdc/option/#t-assetinfo
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/usdc/option/#t-assetinfo.
-        :returns: Request results as dictionary.
-        """
-
-        suffix = "/option/usdc/openapi/private/v1/query-asset-info"
-
-        return self._submit_request(
-            method="POST",
-            path=self.endpoint + suffix,
-            query=kwargs,
-            auth=True
-        )
-
-    def get_margin_mode(self, **kwargs):
-        """
-        Get Margin mode.
-        https://bybit-exchange.github.io/docs/usdc/option/#t-querymarginmode
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/usdc/option/#t-querymarginmode.
-        :returns: Request results as dictionary.
-        """
-
-        suffix = "/option/usdc/openapi/private/v1/query-margin-info"
-
-        return self._submit_request(
-            method="POST",
-            path=self.endpoint + suffix,
-            query=kwargs,
-            auth=True
-        )
-
-    def my_position(self, **kwargs):
-        """
-        Get my position list.
-
-        :param kwargs: See
-            https://bybit-exchange.github.io/docs/usdc/perpetual/#t-queryposition.
-        :returns: Request results as dictionary.
-        """
-
-        suffix = "/option/usdc/openapi/private/v1/query-position"
-
-        return self._submit_request(
-            method="POST",
-            path=self.endpoint + suffix,
-            query=kwargs,
-            auth=True
-        )
