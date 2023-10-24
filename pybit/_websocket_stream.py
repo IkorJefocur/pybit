@@ -312,7 +312,7 @@ class _V5WebSocketManager(_WebSocketManager):
         symbol: (str, list) = False
     ):
 
-        async def prepare_subscription_args(list_of_symbols):
+        def prepare_subscription_args(list_of_symbols):
             """
             Prepares the topic for subscription by formatting it with the
             desired symbols.
@@ -340,6 +340,7 @@ class _V5WebSocketManager(_WebSocketManager):
         }
         # Wait until the connection is open before subscribing.
         await self.connected.wait()
+
         await self.ws.send_json(subscription_message)
         self.subscriptions[req_id] = subscription_message
         for topic in subscription_args:
