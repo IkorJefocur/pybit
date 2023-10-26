@@ -139,7 +139,8 @@ class _WebSocketManager:
             try:
                 self.ws = await self.session.ws_connect(
                     url=url,
-                    heartbeat=self.ping_interval
+                    heartbeat=self.ping_interval,
+                    autoping=False
                 )
                 break
 
@@ -172,6 +173,9 @@ class _WebSocketManager:
             try:
                 async for message in self.ws:
 
+                    if message.type == aiohttp.WSMsgType.PING:
+                        await self.ws.pong(message.data)
+
                     if message.type == aiohttp.WSMsgType.PONG:
                         await self._on_pong()
 
@@ -182,9 +186,8 @@ class _WebSocketManager:
                         await self._on_error(message.data)
                         break
 
-                    if message.type == aiohttp.WSMsgType.CLOSE:
-                        await self._on_close()
-                        break
+                else:
+                    await self._on_close()
 
             except asyncio.TimeoutError as error:
                 await self._on_error(error)
