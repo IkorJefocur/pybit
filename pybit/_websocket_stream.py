@@ -140,16 +140,20 @@ class _WebSocketManager:
                 self.ws = await self.session.ws_connect(
                     url=url,
                     heartbeat=self.ping_interval,
+                    receive_timeout=self.ping_timeout + self.ping_interval,
                     autoping=False
                 )
                 break
 
-            except aiohttp.WSServerHandshakeError:
+            except (
+                aiohttp.WSServerHandshakeError,
+                aiohttp.ClientConnectionError
+            ):
                 retries -= 1
                 # If connection was not successful, raise error.
                 if not infinitely_reconnect and retries <= 0:
                     await self.exit()
-                    raise websocket.WebSocketTimeoutException(
+                    raise RuntimeError(
                         f"WebSocket {self.ws_name} "
                         f"({self.endpoint}) connection "
                         f"failed. Too many connection attempts. pybit will no "
@@ -171,7 +175,8 @@ class _WebSocketManager:
         while self.connected.is_set():
             await self._on_open()
             try:
-                async for message in self.ws:
+                while True:
+                    message = await self.ws.receive()
 
                     if message.type == aiohttp.WSMsgType.PING:
                         await self.ws.pong(message.data)
@@ -183,14 +188,18 @@ class _WebSocketManager:
                         await self._on_message(message.json())
 
                     if message.type == aiohttp.WSMsgType.ERROR:
-                        await self._on_error(message.data)
+                        await self._on_error()
                         break
 
-                else:
-                    await self._on_close()
+                    if message.type == aiohttp.WSMsgType.CLOSE:
+                        await self._on_close(message.data)
+                        break
+
+                    if message.type == aiohttp.WSMsgType.CLOSED:
+                        break
 
             except asyncio.TimeoutError as error:
-                await self._on_error(error)
+                await self._on_error(repr(error))
 
     async def _auth(self):
         """
@@ -210,14 +219,13 @@ class _WebSocketManager:
             {"op": "auth", "args": [self.api_key, expires, signature]}
         )
 
-    async def _on_error(self, error):
+    async def _on_error(self, info = None):
         """
         Exit on errors and raise exception, or attempt reconnect.
         """
         if not self.exited:
-            info = str(error) or str(type(error))
             logger.error(
-                f"WebSocket {self.ws_name} encountered error: {info}."
+                f"WebSocket {self.ws_name} encountered error: {info or ''}."
             )
             await self.exit()
 
@@ -226,12 +234,26 @@ class _WebSocketManager:
             self._reset()
             await self._establish_connection(self.endpoint)
 
-    async def _on_close(self):
+    async def _on_close(self, code):
         """
         WS close.
         """
-        logger.debug(f"WebSocket {self.ws_name} closed.")
-        await self.exit()
+        if code == aiohttp.WSCloseCode.OK:
+            logger.debug(f"WebSocket {self.ws_name} closed.")
+            await self.exit()
+
+        elif code in (
+            aiohttp.WSCloseCode.GOING_AWAY,
+            aiohttp.WSCloseCode.INTERNAL_ERROR,
+            aiohttp.WSCloseCode.SERVICE_RESTART,
+            aiohttp.WSCloseCode.TRY_AGAIN_LATER,
+            aiohttp.WSCloseCode.BAD_GATEWAY
+        ):
+            await self._on_error(str(code))
+
+        else:
+            logger.error(f"WebSocket {self.ws_name} closed with error: {code}.")
+            await self.exit()
 
     async def _on_pong(self):
         """
