@@ -178,25 +178,31 @@ class _WebSocketManager:
                 while True:
                     message = await self.ws.receive()
 
+                    if not self.connected.is_set():
+                        break
+
                     if message.type == aiohttp.WSMsgType.PING:
                         await self.ws.pong(message.data)
+                        continue
 
                     if message.type == aiohttp.WSMsgType.PONG:
                         await self._on_pong()
+                        continue
 
                     if message.type == aiohttp.WSMsgType.TEXT:
                         await self._on_message(message.json())
+                        continue
 
                     if message.type == aiohttp.WSMsgType.ERROR:
-                        await self._on_error()
+                        await self._on_error(repr(message.data))
                         break
 
                     if message.type == aiohttp.WSMsgType.CLOSE:
                         await self._on_close(message.data)
                         break
 
-                    if message.type == aiohttp.WSMsgType.CLOSED:
-                        break
+                    await self._on_error(str(message.type))
+                    break
 
             except asyncio.TimeoutError as error:
                 await self._on_error(repr(error))
@@ -223,10 +229,10 @@ class _WebSocketManager:
         """
         Exit on errors and raise exception, or attempt reconnect.
         """
+        logger.error(
+            f"WebSocket {self.ws_name} encountered error: {info or ''}."
+        )
         if not self.exited:
-            logger.error(
-                f"WebSocket {self.ws_name} encountered error: {info or ''}."
-            )
             await self.exit()
 
         # Reconnect.
