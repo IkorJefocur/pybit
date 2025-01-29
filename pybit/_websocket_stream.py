@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import copy
 from uuid import uuid4
@@ -301,12 +300,6 @@ class _WebSocketManager:
         if self.ws and not self.ws.closed:
             await self.ws.close()
         await self.session.close()
-
-    def subscribe(self, *args, **kwargs):
-        _helpers.fire_and_forget(self._subscribe(*args, **kwargs), self.loop)
-
-    async def _subscribe(self, *args, **kwargs):
-        pass
 
     def subscribe(self, *args, **kwargs):
         coro = self._subscribe(*args, **kwargs)
